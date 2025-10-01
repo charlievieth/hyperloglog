@@ -1,8 +1,6 @@
 module github.com/axiomhq/hyperloglog
 
-go 1.23
-
-toolchain go1.23.4
+go 1.24
 
 require (
 	github.com/davecgh/go-spew v1.1.1

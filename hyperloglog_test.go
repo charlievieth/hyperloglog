@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
@@ -703,18 +704,20 @@ func Benchmark_Add_100000000(b *testing.B) {
 	benchmarkAdd(b, sk, 100000000)
 }
 
-func randStr(n int) string {
-	i := rand.Uint32()
-	return fmt.Sprintf("a%d %d", i, n)
-}
-
 func benchmark(precision uint8, n int) {
 	hll, _ := NewSketch(precision, true)
 
+	rr := rand.New(rand.NewSource(12345))
+	buf := make([]byte, 1, 32)
+	buf[0] = 'a'
 	for i := 0; i < n; i++ {
-		s := []byte(randStr(i))
-		hll.Insert(s)
-		hll.Insert(s)
+		u := rr.Uint32()
+		b := buf[:1]
+		b = strconv.AppendUint(b, uint64(u), 10)
+		b = append(b, ' ')
+		b = append(b, b[1:len(b)-1]...)
+		hll.Insert(b)
+		hll.Insert(b)
 	}
 
 	e := hll.Estimate()
@@ -722,37 +725,33 @@ func benchmark(precision uint8, n int) {
 		return 100 * math.Abs(float64(n)-float64(est)) / float64(n)
 	}
 
-	fmt.Printf("\nReal Cardinality: %8d\n", n)
-	fmt.Printf("HyperLogLog     : %8d,   Error: %f%%\n", e, percentErr(e))
+	if testing.Verbose() {
+		fmt.Printf("\nReal Cardinality: %8d\n", n)
+		fmt.Printf("HyperLogLog     : %8d,   Error: %f%%\n\n", e, percentErr(e))
+	}
 }
 
 func BenchmarkHll4(b *testing.B) {
-	fmt.Println("")
 	benchmark(4, b.N)
 }
 
 func BenchmarkHll6(b *testing.B) {
-	fmt.Println("")
 	benchmark(6, b.N)
 }
 
 func BenchmarkHll8(b *testing.B) {
-	fmt.Println("")
 	benchmark(8, b.N)
 }
 
 func BenchmarkHll10(b *testing.B) {
-	fmt.Println("")
 	benchmark(10, b.N)
 }
 
 func BenchmarkHll14(b *testing.B) {
-	fmt.Println("")
 	benchmark(14, b.N)
 }
 
 func BenchmarkHll16(b *testing.B) {
-	fmt.Println("")
 	benchmark(16, b.N)
 }
 
@@ -934,5 +933,40 @@ func Benchmark_MarshalBinary(b *testing.B) {
 				})
 			}
 		}
+	}
+}
+
+func Benchmark_SumAndZeros(b *testing.B) {
+	// {
+	// 	// sk := NewNoSparse()
+	// 	sk := New16NoSparse()
+	// 	buf := make([]byte, 0, 16)
+	// 	rr := rand.NewSource(12345).(rand.Source64)
+	// 	for range 100_000 {
+	// 		buf = strconv.AppendUint(buf[:0], rr.Uint64(), 10)
+	// 		buf = strconv.AppendUint(buf, rr.Uint64(), 10)
+	// 		// fmt.Printf("%X\n", buf)
+	// 		sk.Insert(buf)
+	// 	}
+	// 	sk.Estimate()
+	// 	// fmt.Printf("%X\n", sk.regs)
+	// 	fmt.Println("regs:", len(sk.regs), bytes.Count(sk.regs, []byte{0}))
+	// }
+
+	for _, n := range []int{16384, 65536} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			regs := make([]uint8, n)
+			// TODO: This might not match real world data
+			// so insteak use an actual Sketch.
+			for i := range regs {
+				if i&1 == 0 {
+					regs[i] = uint8(i)
+				}
+			}
+			b.ResetTimer()
+			for b.Loop() {
+				sumAndZeros(regs)
+			}
+		})
 	}
 }

@@ -149,9 +149,13 @@ func (v variableLengthList) AppendBinary(data []byte) ([]byte, error) {
 
 func (v variableLengthList) decode(i int) (uint32, int) {
 	var x uint32
+	// var n uint32
 	j := i
 	for ; v[j]&0x80 != 0; j++ {
+		// fmt.Println("decode:", uint(j-i), uint(j-i)*7)
 		x |= uint32(v[j]&0x7f) << (uint(j-i) * 7)
+		// x |= uint32(v[j]&0x7f) << n
+		// n += 7
 	}
 	x |= uint32(v[j]) << (uint(j-i) * 7)
 	return x, j + 1
@@ -160,7 +164,9 @@ func (v variableLengthList) decode(i int) (uint32, int) {
 func (v variableLengthList) Append(x uint32) variableLengthList {
 	for x&0xffffff80 != 0 {
 		v = append(v, uint8((x&0x7f)|0x80))
+		// v = append(v, uint8(x)|0x80)
 		x >>= 7
 	}
+	// return append(v, uint8(x))
 	return append(v, uint8(x&0x7f))
 }

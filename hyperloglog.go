@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
+	"unsafe"
 )
 
 const (
@@ -144,8 +144,17 @@ func (sk *Sketch) toNormal() {
 	sk.sparseList = nil
 }
 
-func (sk *Sketch) insert(i uint32, r uint8) { sk.regs[i] = max(r, sk.regs[i]) }
-func (sk *Sketch) Insert(e []byte)          { sk.InsertHash(hash(e)) }
+func (sk *Sketch) insert(i uint32, r uint8) {
+	if r > sk.regs[i] {
+		sk.regs[i] = r // Only write when larger
+	}
+}
+
+func (sk *Sketch) Insert(e []byte) { sk.InsertHash(hash(e)) }
+
+func (sk *Sketch) InsertString(e string) {
+	sk.InsertHash(hash(unsafe.Slice(unsafe.StringData(e), len(e))))
+}
 
 func (sk *Sketch) InsertHash(x uint64) {
 	if sk.sparse() {
@@ -159,6 +168,12 @@ func (sk *Sketch) InsertHash(x uint64) {
 }
 
 func (sk *Sketch) Estimate() uint64 {
+	// {
+	// 	t := time.Now()
+	// 	defer func() {
+	// 		fmt.Println(time.Since(t), "Estimate")
+	// 	}()
+	// }
 	if sk.sparse() {
 		sk.mergeSparse()
 		return uint64(linearCount(mp, mp-sk.sparseList.count))
@@ -167,10 +182,12 @@ func (sk *Sketch) Estimate() uint64 {
 	sum, ez := sumAndZeros(sk.regs)
 	m := float64(sk.m)
 
+	// TODO: beta can be improved!!!
 	est := sk.alpha * m * (m - ez) / (sum + beta(sk.p, ez))
 	return uint64(est + 0.5)
 }
 
+// NB: this is faster than I expected, but should be better tested
 func (sk *Sketch) mergeSparse() {
 	if sk.tmpSet.Len() == 0 {
 		return
@@ -334,7 +351,7 @@ func sumAndZeros(regs []uint8) (res, ez float64) {
 		if v == 0 {
 			ez++
 		}
-		res += 1.0 / math.Pow(2.0, float64(v))
+		res += 1.0 / float64(uint(1)<<uint(v))
 	}
 	return res, ez
 }

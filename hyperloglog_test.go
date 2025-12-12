@@ -1,15 +1,18 @@
 package hyperloglog
 
 import (
+	"bytes"
 	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	"math/rand"
 	"reflect"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/stretchr/testify/require"
@@ -37,22 +40,20 @@ func TestHLL_CardinalityHashed(t *testing.T) {
 	require.NoError(t, err)
 
 	step := 10
-	unique := map[string]bool{}
 
-	for i := 1; len(unique) <= 10000000; i++ {
-		str := fmt.Sprintf("flow-%d", i)
-		hlltc.Insert([]byte(str))
-		unique[str] = true
-
-		if len(unique)%step == 0 {
+	buf := []byte("flow-")
+	for i := 1; i <= 10000000; i++ {
+		b := strconv.AppendInt(buf, int64(i), 10)
+		hlltc.Insert(b)
+		if i%step == 0 {
 			step *= 5
-			exact := uint64(len(unique))
+			exact := uint64(i)
 			res := uint64(hlltc.Estimate())
 			ratio := 100 * estimateError(res, exact)
 			require.LessOrEqual(t, ratio, 2.0, "Exact %d, got %d which is %.2f%% error", exact, res, ratio)
 		}
 	}
-	exact := uint64(len(unique))
+	exact := uint64(10000000)
 	res := uint64(hlltc.Estimate())
 	ratio := 100 * estimateError(res, exact)
 	require.LessOrEqual(t, ratio, 2.0, "Exact %d, got %d which is %.2f%% error", exact, res, ratio)
@@ -239,15 +240,24 @@ func TestHLL_Merge_Complex(t *testing.T) {
 	sk3, err := NewSketch(14, true)
 	require.NoError(t, err)
 
-	unique := map[string]bool{}
+	unique := make(map[string]struct{}, 10000000)
 
+	buf := make([]byte, 0, 32)
+	buf = append(buf, "flow-"...)
 	for i := 1; len(unique) <= 10000000; i++ {
-		str := fmt.Sprintf("flow-%d", i)
-		sk1.Insert([]byte(str))
+		buf = strconv.AppendInt(buf[:len("flow-")], int64(i), 10)
+		sk1.Insert(buf)
 		if i%2 == 0 {
-			sk2.Insert([]byte(str))
+			sk2.Insert(buf)
 		}
-		unique[str] = true
+		unique[string(buf)] = struct{}{}
+
+		// str := fmt.Sprintf("flow-%d", i)
+		// sk1.Insert([]byte(str))
+		// if i%2 == 0 {
+		// 	sk2.Insert([]byte(str))
+		// }
+		// unique[str] = true
 	}
 
 	exact1 := uint64(len(unique))
@@ -269,7 +279,7 @@ func TestHLL_Merge_Complex(t *testing.T) {
 	for i := 1; i <= 500000; i++ {
 		str := fmt.Sprintf("stream-%d", i)
 		sk2.Insert([]byte(str))
-		unique[str] = true
+		unique[str] = struct{}{}
 	}
 
 	require.NoError(t, sk2.Merge(sk3))
@@ -616,20 +626,36 @@ func NewTestSketch(p uint8) *Sketch {
 	return sk
 }
 
+func randBytes(n int) []byte {
+	if n <= 0 {
+		panic(fmt.Sprintf("non-positive value: %d", n))
+	}
+	rr := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, 0, n+16)
+	for len(b) < n {
+		u := rr.Uint64()
+		b = binary.NativeEndian.AppendUint64(b, u)
+		b = binary.NativeEndian.AppendUint64(b, bits.Reverse64(u))
+	}
+	return b[:n]
+}
+
 // Generate random data to add to the sketch.
 func genData(num int) [][]byte {
 	const dataLen = 8
 	out := make([][]byte, num)
 	numBytes := dataLen * num
-	buf := make([]byte, numBytes)
+	// buf := make([]byte, numBytes)
 
-	// generate random bytes
-	n, err := crand.Read(buf)
-	if err != nil {
-		panic(err)
-	} else if n != numBytes {
-		panic(fmt.Errorf("only %d bytes generated, expected %d", n, numBytes))
-	}
+	// // generate random bytes
+	// n, err := crand.Read(buf)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// if n != numBytes {
+	// 	panic(fmt.Errorf("only %d bytes generated, expected %d", n, numBytes))
+	// }
+	buf := randBytes(numBytes)
 
 	for i := range out {
 		out[i] = buf[:dataLen]
@@ -645,8 +671,8 @@ func benchmarkAdd(b *testing.B, sk *Sketch, n int) {
 	blobs, ok := benchdata[n]
 	if !ok {
 		// Generate it.
-		benchdata[n] = genData(n)
-		blobs = benchdata[n]
+		blobs = genData(n)
+		benchdata[n] = blobs
 	}
 
 	b.ReportAllocs()
@@ -937,27 +963,27 @@ func Benchmark_MarshalBinary(b *testing.B) {
 }
 
 func Benchmark_SumAndZeros(b *testing.B) {
-	// {
-	// 	// sk := NewNoSparse()
-	// 	sk := New16NoSparse()
-	// 	buf := make([]byte, 0, 16)
-	// 	rr := rand.NewSource(12345).(rand.Source64)
-	// 	for range 100_000 {
-	// 		buf = strconv.AppendUint(buf[:0], rr.Uint64(), 10)
-	// 		buf = strconv.AppendUint(buf, rr.Uint64(), 10)
-	// 		// fmt.Printf("%X\n", buf)
-	// 		sk.Insert(buf)
-	// 	}
-	// 	sk.Estimate()
-	// 	// fmt.Printf("%X\n", sk.regs)
-	// 	fmt.Println("regs:", len(sk.regs), bytes.Count(sk.regs, []byte{0}))
-	// }
+	{
+		// sk := NewNoSparse()
+		sk := New16NoSparse()
+		buf := make([]byte, 0, 16)
+		rr := rand.NewSource(12345).(rand.Source64)
+		for range 100_000 {
+			buf = strconv.AppendUint(buf[:0], rr.Uint64(), 10)
+			buf = strconv.AppendUint(buf, rr.Uint64(), 10)
+			// fmt.Printf("%X\n", buf)
+			sk.Insert(buf)
+		}
+		sk.Estimate()
+		// fmt.Printf("%X\n", sk.regs)
+		fmt.Println("regs:", len(sk.regs), bytes.Count(sk.regs, []byte{0}))
+	}
 
 	for _, n := range []int{16384, 65536} {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
 			regs := make([]uint8, n)
 			// TODO: This might not match real world data
-			// so insteak use an actual Sketch.
+			// so instead use an actual Sketch.
 			for i := range regs {
 				if i&1 == 0 {
 					regs[i] = uint8(i)

@@ -1199,37 +1199,33 @@ func benchmark(b *testing.B, precision uint8) {
 		return 100 * math.Abs(float64(n)-float64(est)) / float64(n)
 	}
 
-	fmt.Printf("\nReal Cardinality: %8d\n", n)
-	fmt.Printf("HyperLogLog     : %8d,   Error: %f%%\n", e, percentErr(e))
+	if testing.Verbose() {
+		b.Logf("\nReal Cardinality: %8d\n", n)
+		b.Logf("HyperLogLog     : %8d,   Error: %f%%\n", e, percentErr(e))
+	}
 }
 
 func BenchmarkHll4(b *testing.B) {
-	fmt.Println("")
 	benchmark(b, 4)
 }
 
 func BenchmarkHll6(b *testing.B) {
-	fmt.Println("")
 	benchmark(b, 6)
 }
 
 func BenchmarkHll8(b *testing.B) {
-	fmt.Println("")
 	benchmark(b, 8)
 }
 
 func BenchmarkHll10(b *testing.B) {
-	fmt.Println("")
 	benchmark(b, 10)
 }
 
 func BenchmarkHll14(b *testing.B) {
-	fmt.Println("")
 	benchmark(b, 14)
 }
 
 func BenchmarkHll16(b *testing.B) {
-	fmt.Println("")
 	benchmark(b, 16)
 }
 
@@ -1533,4 +1529,127 @@ func BenchmarkReset(b *testing.B) {
 		}
 		run(b, sk, makeHashes(1000))
 	})
+}
+
+func Benchmark_SumAndZeros(b *testing.B) {
+	for _, n := range []int{16384, 65536} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			regs := make([]uint8, n)
+			// TODO: This might not match real world data
+			// so instead use an actual Sketch.
+			for i := range regs {
+				if i&1 == 0 {
+					regs[i] = uint8(i) % 16
+				}
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sumAndZeros(regs)
+			}
+		})
+	}
+}
+
+func Benchmark_Estimate(b *testing.B) {
+	for _, p := range []uint8{14, 16} {
+		for _, n := range []int{10000, 1000000} {
+			b.Run(fmt.Sprintf("p%d/n%d", p, n), func(b *testing.B) {
+				sk, _ := NewSketch(p, false)
+				for i := 0; i < n; i++ {
+					sk.InsertHash(rand.Uint64())
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_ = sk.Estimate()
+				}
+			})
+		}
+	}
+}
+
+func TestSumAndZeros(t *testing.T) {
+	for _, p := range []uint8{4, 14, 18} {
+		sk, _ := NewSketch(p, false)
+		for i := range sk.regs {
+			sk.regs[i] = uint8(rand.Intn(int(maxRho(p)) + 1))
+		}
+		var want, wantZeros float64
+		for _, v := range sk.regs {
+			if v == 0 {
+				wantZeros++
+			}
+			want += 1.0 / math.Pow(2.0, float64(v))
+		}
+		got, gotZeros := sumAndZeros(sk.regs)
+		require.Equal(t, wantZeros, gotZeros)
+		require.InEpsilon(t, want, got, 1e-12)
+	}
+}
+
+func TestMergeRegs(t *testing.T) {
+	for _, n := range []int{0, 1, 7, 8, 9, 16, 1 << 14} {
+		dst := make([]uint8, n)
+		src := make([]uint8, n)
+		want := make([]uint8, n)
+		for i := range dst {
+			dst[i] = uint8(rand.Intn(62))
+			src[i] = uint8(rand.Intn(62))
+			want[i] = max(dst[i], src[i])
+		}
+		mergeRegs(dst, src)
+		require.Equal(t, want, dst)
+	}
+	// Exhaustively check every pair of register values.
+	for a := 0; a < 0x80; a++ {
+		for b := 0; b < 0x80; b++ {
+			x := uint64(a) * 0x0101010101010101
+			y := uint64(b) * 0x0101010101010101
+			require.Equal(t, uint64(max(a, b))*0x0101010101010101, maxBytes(x, y))
+		}
+	}
+}
+
+// mergeSparse copies runs of the old list's bytes instead of re-encoding them,
+// so compare it against encoding the sorted union from scratch.
+func TestHLL_MergeSparse_MatchesReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	for iter := 0; iter < 500; iter++ {
+		sk, err := NewSketch(14, true)
+		require.NoError(t, err)
+
+		// Draw keys from a small range now and then so the tmp set and the
+		// old list overlap, and so keys land before and after the old list.
+		narrow := iter%3 == 0
+		draw := func() uint32 {
+			x := rng.Uint64()
+			if narrow {
+				x = x % (1 << 8) << (64 - pp)
+			}
+			return encodeHash(x, sk.p, pp)
+		}
+
+		want := map[uint32]struct{}{}
+		for round := 0; round < 3; round++ {
+			for n := rng.Intn(200); n > 0; n-- {
+				k := draw()
+				sk.tmpSet.add(k)
+				want[k] = struct{}{}
+			}
+			sk.mergeSparse()
+
+			keys := make([]uint32, 0, len(want))
+			for k := range want {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			ref := newCompressedList(0)
+			for _, k := range keys {
+				ref.Append(k)
+			}
+			require.Equal(t, ref.count, sk.sparseList.count)
+			require.Equal(t, ref.last, sk.sparseList.last)
+			require.Equal(t, ref.b, sk.sparseList.b)
+		}
+	}
 }

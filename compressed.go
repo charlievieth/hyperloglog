@@ -172,6 +172,17 @@ func (v *compressedList) Append(x uint32) {
 	v.last = x
 }
 
+// appendRaw appends n entries whose delta encoded bytes are b and whose last
+// entry is last. The first delta in b must be relative to v.last.
+func (v *compressedList) appendRaw(b []byte, n, last uint32) {
+	if n == 0 {
+		return
+	}
+	v.count += n
+	v.b = append(v.b, b...)
+	v.last = last
+}
+
 func (v *compressedList) Iter() iterator {
 	return iterator{0, 0, v}
 }

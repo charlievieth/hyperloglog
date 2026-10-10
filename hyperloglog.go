@@ -157,12 +157,36 @@ func (sk *Sketch) mergeDenseSketch(other *Sketch) {
 			sk.insert(i, r)
 		}
 	} else {
-		for i, v := range other.regs {
-			if v > sk.regs[i] {
-				sk.regs[i] = v
-			}
-		}
+		mergeRegs(sk.regs, other.regs)
 	}
+}
+
+// mergeRegs sets each register of dst to the larger of itself and the
+// matching register of src. It requires len(src) >= len(dst) and every
+// register to be below 0x80, which holds since registers are at most 64-p+1.
+func mergeRegs(dst, src []uint8) {
+	src = src[:len(dst)]
+	i := 0
+	for ; i+8 <= len(dst); i += 8 {
+		a := binary.LittleEndian.Uint64(dst[i:])
+		b := binary.LittleEndian.Uint64(src[i:])
+		binary.LittleEndian.PutUint64(dst[i:], maxBytes(a, b))
+	}
+	for ; i < len(dst); i++ {
+		dst[i] = max(dst[i], src[i])
+	}
+}
+
+// maxBytes returns the bytewise maximum of a and b, whose bytes must all be
+// below 0x80.
+func maxBytes(a, b uint64) uint64 {
+	const hi = 0x8080808080808080
+	// Each byte of a|hi is at least 0x80 and each byte of b is below it, so
+	// the subtraction never borrows across bytes, and a byte keeps its high
+	// bit exactly when a >= b there.
+	ge := ((a | hi) - b) & hi
+	mask := (ge >> 7) * 0xff
+	return a&mask | b&^mask
 }
 
 func (sk *Sketch) toNormal() {
@@ -236,32 +260,51 @@ func (sk *Sketch) mergeSparse() {
 	})
 	slices.Sort(keys)
 
-	newList := newCompressedList(4*sk.tmpSet.Len() + sk.sparseList.Len())
-	for iter, i := sk.sparseList.Iter(), 0; iter.HasNext() || i < len(keys); {
-		if !iter.HasNext() {
-			newList.Append(keys[i])
-			i++
-			continue
+	old := sk.sparseList
+	newList := newCompressedList(4*len(keys) + old.Len())
+	var (
+		off  int    // offset in old.b of the next old entry
+		prev uint32 // the old entry before off
+		used uint32 // number of old entries before off
+	)
+	// copyBelow appends the old entries below k. Only the first one has to be
+	// re-encoded: the deltas between the rest are the same in both lists, so
+	// their bytes are copied as they are.
+	copyBelow := func(k uint32) {
+		if off >= old.Len() {
+			return
 		}
-
-		if i >= len(keys) {
-			newList.Append(iter.Next())
-			continue
+		x, next := old.decode(off, prev)
+		if x >= k {
+			return
 		}
-
-		x1, adv := iter.Peek()
-		x2 := keys[i]
-		if x1 == x2 {
-			newList.Append(x1)
-			iter.Advance(x1, adv)
-			i++
-		} else if x1 > x2 {
-			newList.Append(x2)
-			i++
-		} else {
-			newList.Append(x1)
-			iter.Advance(x1, adv)
+		newList.Append(x)
+		prev, off, used = x, next, used+1
+		runStart, runLen := off, uint32(0)
+		for off < old.Len() {
+			x, next = old.decode(off, prev)
+			if x >= k {
+				break
+			}
+			prev, off, runLen = x, next, runLen+1
 		}
+		newList.appendRaw(old.b[runStart:off], runLen, prev)
+		used += runLen
+	}
+	for _, k := range keys {
+		copyBelow(k)
+		// Emit k once even when the old list already holds it.
+		if off < old.Len() {
+			if x, next := old.decode(off, prev); x == k {
+				prev, off, used = x, next, used+1
+			}
+		}
+		newList.Append(k)
+	}
+	if off < old.Len() {
+		x, next := old.decode(off, prev)
+		newList.Append(x)
+		newList.appendRaw(old.b[next:], old.count-used-1, old.last)
 	}
 
 	sk.sparseList = newList
@@ -520,14 +563,32 @@ func (sk *Sketch) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// sumAndZeros returns the sum of 2^-v over the registers and the number of
+// registers that are zero.
 func sumAndZeros(regs []uint8) (res, ez float64) {
-	for _, v := range regs {
-		if v == 0 {
-			ez++
-		}
-		res += 1.0 / math.Pow(2.0, float64(v))
+	// Count the registers by value and weigh each count once, instead of
+	// converting and adding every register. Registers are at most 64-p+1, so
+	// v&63 only removes the bounds check. Spreading the counts over four
+	// histograms keeps runs of equal registers from serializing on one
+	// counter.
+	var hist [4][64]uint32
+	i := 0
+	for ; i+4 <= len(regs); i += 4 {
+		hist[0][regs[i]&63]++
+		hist[1][regs[i+1]&63]++
+		hist[2][regs[i+2]&63]++
+		hist[3][regs[i+3]&63]++
 	}
-	return res, ez
+	for ; i < len(regs); i++ {
+		hist[0][regs[i]&63]++
+	}
+	// Add the smallest terms first: every c*2^-v is exact, so the sum is at
+	// least as precise as adding the registers one by one.
+	for v := 63; v >= 0; v-- {
+		c := hist[0][v] + hist[1][v] + hist[2][v] + hist[3][v]
+		res += math.Ldexp(float64(c), -v)
+	}
+	return res, float64(hist[0][0] + hist[1][0] + hist[2][0] + hist[3][0])
 }
 
 // unmarshalBinaryV1 requires len(sk.regs) == int(sk.m) and
